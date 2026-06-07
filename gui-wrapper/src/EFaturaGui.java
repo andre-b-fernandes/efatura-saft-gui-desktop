@@ -13,12 +13,15 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class EFaturaGui extends JFrame {
+    private double uiScale = 1.0;
+
     private final JTextField jarPathField = new JTextField();
     private final JTextField nifField = new JTextField();
     private final JPasswordField passwordField = new JPasswordField();
     private final JTextField yearField = new JTextField();
     private final JTextField monthField = new JTextField();
     private final JComboBox<String> operationCombo = new JComboBox<>(new String[]{"validar", "enviar"});
+    private final JComboBox<String> scaleCombo = new JComboBox<>(new String[]{"95%", "100%", "110%"});
     private final JTextField inputPathField = new JTextField();
     private final JCheckBox testModeCheck = new JCheckBox("Modo de testes (-t)");
 
@@ -40,6 +43,16 @@ public class EFaturaGui extends JFrame {
     private void buildUi() {
         JPanel root = new JPanel(new BorderLayout(12, 12));
         root.setBorder(new EmptyBorder(14, 14, 14, 14));
+
+        JPanel header = new JPanel(new BorderLayout());
+        JLabel title = new JLabel("e-Fatura SAF-T Wrapper");
+        title.setFont(new Font("Segoe UI", Font.BOLD, 20));
+        header.add(title, BorderLayout.WEST);
+
+        JPanel scalePanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+        scalePanel.add(new JLabel("Escala"));
+        scalePanel.add(scaleCombo);
+        header.add(scalePanel, BorderLayout.EAST);
 
         JPanel form = new JPanel(new GridBagLayout());
         GridBagConstraints c = new GridBagConstraints();
@@ -72,30 +85,46 @@ public class EFaturaGui extends JFrame {
         top.add(form, BorderLayout.CENTER);
         top.add(controls, BorderLayout.SOUTH);
 
+        JScrollPane topScroll = new JScrollPane(top);
+        topScroll.setBorder(BorderFactory.createEmptyBorder());
+        topScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        topScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+        topScroll.getVerticalScrollBar().setUnitIncrement(18);
+
         logArea.setEditable(false);
         logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
         JScrollPane logScroll = new JScrollPane(logArea);
         logScroll.setBorder(BorderFactory.createTitledBorder("Logs"));
 
-        root.add(top, BorderLayout.NORTH);
-        root.add(logScroll, BorderLayout.CENTER);
+        JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, topScroll, logScroll);
+        splitPane.setResizeWeight(0.58);
+        splitPane.setContinuousLayout(true);
+
+        root.add(header, BorderLayout.NORTH);
+        root.add(splitPane, BorderLayout.CENTER);
 
         setContentPane(root);
+        applyUiScale();
     }
 
     private void addLabeledField(JPanel panel, GridBagConstraints c, String label, JTextField field, Runnable browseAction) {
         c.gridx = 0;
         c.weightx = 0;
-        panel.add(new JLabel(label), c);
+        JLabel textLabel = new JLabel(label);
+        textLabel.setFont(new Font("Segoe UI", Font.PLAIN, 14));
+        panel.add(textLabel, c);
 
         c.gridx = 1;
         c.weightx = 1;
+        field.setFont(new Font("Segoe UI", Font.PLAIN, 14));
+        field.setPreferredSize(new Dimension(field.getPreferredSize().width, 30));
         panel.add(field, c);
 
         c.gridx = 2;
         c.weightx = 0;
         if (browseAction != null) {
-            JButton button = new JButton("...");
+            JButton button = new JButton("Escolher");
+            button.setFont(new Font("Segoe UI", Font.PLAIN, 13));
             button.addActionListener(e -> browseAction.run());
             panel.add(button, c);
         } else {
@@ -108,10 +137,14 @@ public class EFaturaGui extends JFrame {
     private void addLabeledCombo(JPanel panel, GridBagConstraints c, String label, JComboBox<String> combo) {
         c.gridx = 0;
         c.weightx = 0;
-        panel.add(new JLabel(label), c);
+        JLabel textLabel = new JLabel(label);
+        textLabel.setFont(new Font("Segoe UI", Font.PLAIN, 14));
+        panel.add(textLabel, c);
 
         c.gridx = 1;
         c.weightx = 1;
+        combo.setFont(new Font("Segoe UI", Font.PLAIN, 14));
+        combo.setPreferredSize(new Dimension(combo.getPreferredSize().width, 30));
         panel.add(combo, c);
 
         c.gridx = 2;
@@ -139,6 +172,17 @@ public class EFaturaGui extends JFrame {
     private void attachActions() {
         runButton.addActionListener(e -> runJar());
         stopButton.addActionListener(e -> stopJar());
+        scaleCombo.addActionListener(e -> {
+            int idx = scaleCombo.getSelectedIndex();
+            if (idx == 0) {
+                uiScale = 0.95;
+            } else if (idx == 2) {
+                uiScale = 1.10;
+            } else {
+                uiScale = 1.0;
+            }
+            applyUiScale();
+        });
     }
 
     private void chooseJarFile() {
@@ -330,6 +374,76 @@ public class EFaturaGui extends JFrame {
 
     private void clearLog() {
         logArea.setText("");
+    }
+
+    private void applyUiScale() {
+        applyScaleRecursively(getContentPane());
+        revalidate();
+        repaint();
+    }
+
+    private void applyScaleRecursively(Component component) {
+        if (component instanceof JLabel) {
+            JLabel label = (JLabel) component;
+            Font font = getBaseFont(label);
+            if (font != null) {
+                label.setFont(font.deriveFont((float) scaled(font.getSize2D())));
+            }
+        } else if (component instanceof JButton) {
+            JButton button = (JButton) component;
+            Font font = getBaseFont(button);
+            if (font != null) {
+                button.setFont(font.deriveFont((float) scaled(font.getSize2D())));
+            }
+            Dimension preferred = button.getPreferredSize();
+            button.setPreferredSize(new Dimension(preferred.width, Math.max(scaled(28), preferred.height)));
+        } else if (component instanceof JTextField) {
+            JTextField field = (JTextField) component;
+            Font font = getBaseFont(field);
+            if (font != null) {
+                field.setFont(font.deriveFont((float) scaled(font.getSize2D())));
+            }
+            Dimension preferred = field.getPreferredSize();
+            field.setPreferredSize(new Dimension(preferred.width, scaled(30)));
+        } else if (component instanceof JComboBox) {
+            JComboBox<?> combo = (JComboBox<?>) component;
+            Font font = getBaseFont(combo);
+            if (font != null) {
+                combo.setFont(font.deriveFont((float) scaled(font.getSize2D())));
+            }
+            Dimension preferred = combo.getPreferredSize();
+            combo.setPreferredSize(new Dimension(preferred.width, scaled(30)));
+        } else if (component instanceof JCheckBox) {
+            JCheckBox checkBox = (JCheckBox) component;
+            Font font = getBaseFont(checkBox);
+            if (font != null) {
+                checkBox.setFont(font.deriveFont((float) scaled(font.getSize2D())));
+            }
+        } else if (component instanceof JTextArea) {
+            JTextArea textArea = (JTextArea) component;
+            textArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, scaled(13)));
+        }
+
+        if (component instanceof Container) {
+            for (Component child : ((Container) component).getComponents()) {
+                applyScaleRecursively(child);
+            }
+        }
+    }
+
+    private int scaled(double value) {
+        return Math.max(10, (int) Math.round(value * uiScale));
+    }
+
+    private Font getBaseFont(JComponent component) {
+        Object base = component.getClientProperty("baseFont");
+        if (base instanceof Font) {
+            return (Font) base;
+        }
+
+        Font current = component.getFont();
+        component.putClientProperty("baseFont", current);
+        return current;
     }
 
     public static void main(String[] args) {

@@ -14,6 +14,7 @@ Desktop app in Java Swing that wraps the official AT e-Fatura JAR so you can run
 - `src/EFaturaGui.java`: main GUI and process execution logic
 - `build.bat`: compiles Java source to `bin`
 - `run.bat`: runs build, then launches the GUI
+- `package-exe.bat`: builds a Windows `.exe` installer using `jpackage`
 - `bin/`: compiled `.class` files
 
 ## Requirements
@@ -48,6 +49,35 @@ javac -version
 
 If compilation succeeds, classes are written to `bin`.
 
+## Load environment variables on Windows
+
+This project includes a local `.env` file with Java packaging settings.
+
+PowerShell (current session):
+
+```powershell
+.\load-env.ps1
+```
+
+PowerShell (persist for future terminals, user scope):
+
+```powershell
+.\load-env.ps1 -PersistUser
+```
+
+CMD (current session):
+
+```cmd
+call load-env.cmd
+```
+
+Notes:
+
+- The values are loaded into the current terminal session only.
+- Open a new terminal and run the loader again if needed.
+- If you used `-PersistUser`, open a new terminal to pick up user-level changes.
+- After loading, you can verify with `jpackage --version`.
+
 ## Launch the app
 
 Recommended (build + run):
@@ -61,6 +91,40 @@ Alternative (run only, if already built):
 ```powershell
 java -cp .\bin EFaturaGui
 ```
+
+## Generate a Windows .exe
+
+This project includes an automated script for packaging.
+
+Prerequisites:
+
+- A full JDK with `jpackage` available in `PATH`
+- In many setups, this means installing a modern JDK and ensuring `...\\bin` is on `PATH`
+- Validate with:
+
+```powershell
+jpackage --version
+```
+
+Generate the installer:
+
+```powershell
+.\package-exe.bat
+```
+
+What the script does:
+
+1. Compiles the project (`build.bat`)
+2. Creates `dist\EFaturaGuiWrapper.jar` from compiled classes
+3. Copies `..\FACTEMICLI-2.9.1-100067-cmdClient.jar` to `dist` if found
+4. Runs `jpackage --type exe`
+5. Writes the generated installer to `release`
+
+Distribution notes:
+
+- The generated `.exe` installer is Windows-only.
+- On target machines, users do not need to run from source code.
+- Keep your official AT JAR policy in mind; replace/update the bundled JAR as needed.
 
 ## How to use the GUI
 
@@ -91,6 +155,8 @@ java -cp .\bin EFaturaGui
 	- Check NIF/password, internet connection, and machine clock synchronization.
 - Build fails:
 	- Re-run `javac -version` and verify you have a full JDK (not only JRE).
+- `jpackage` not found:
+	- Install a JDK that includes `jpackage` and ensure its `bin` folder is in `PATH`.
 
 ## Next planned improvements
 

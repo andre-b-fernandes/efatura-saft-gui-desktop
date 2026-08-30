@@ -1,33 +1,11 @@
 import java.awt.*;
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
-import java.io.PrintWriter;
-import java.nio.charset.Charset;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.LocalDate;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.filechooser.FileNameExtensionFilter;
 
 public class EFaturaGui extends JFrame {
-    // The AT client prints using the OS console charset (e.g. Windows-1252 on pt-PT Windows), not UTF-8.
-    private static final Charset PROCESS_OUTPUT_CHARSET = resolveNativeCharset();
-
-    // Matches the AT client's "o jar precisa de atualizacao" message, e.g. "nova versao 2.9.2-103953".
-    private static final Pattern UPDATE_VERSION_PATTERN =
-            Pattern.compile("nova vers[aã]o\\s+([0-9]+(?:\\.[0-9]+)+-[0-9]+)", Pattern.CASE_INSENSITIVE);
-    private static final String UPDATE_PROMPT_MARKER = "Indique o caminho completo para guardar o novo jar";
-
     private double uiScale = 1.0;
 
     private final JTextField jarPathField = new JTextField();
@@ -44,7 +22,7 @@ public class EFaturaGui extends JFrame {
     private final JButton runButton = new JButton("Executar");
     private final JButton stopButton = new JButton("Parar");
 
-    private volatile Process currentProcess;
+    private final AtClientRunner atClientRunner = new AtClientRunner();
 
     public EFaturaGui() {
         setTitle("e-Fatura SAF-T Wrapper");
@@ -172,65 +150,17 @@ public class EFaturaGui extends JFrame {
     private void preloadDefaults() {
         Path cwd = Path.of(System.getProperty("user.dir"));
 
-        // No exact version is hardcoded here: findDefaultJarFile() matches any FACTEMICLI*.jar by prefix.
-        Path detectedJar = findDefaultJarFile();
+        Path detectedJar = JarLocator.findDefaultJarFile();
         Path defaultJar = detectedJar != null ? detectedJar : cwd.resolve("FACTEMICLI-2.9.1-100067-cmdClient.jar");
         jarPathField.setText(defaultJar.toAbsolutePath().toString());
 
-        Path defaultXml = cwd.resolve("F_D05_515105422_SAFT_20260501_20260531.xml");
-        if (Files.exists(defaultXml)) {
+        Path defaultXml = JarLocator.findDefaultXmlFile();
+        if (defaultXml != null) {
             inputPathField.setText(defaultXml.toAbsolutePath().toString());
         }
 
-        LocalDate now = LocalDate.now();
-        yearField.setText(String.valueOf(now.getYear()));
-        monthField.setText(String.format("%02d", now.getMonthValue()));
-    }
-
-    // The working directory of a jpackage exe launched from a shortcut is unreliable,
-    // so locate the AT client JAR relative to where this app's own JAR is running from.
-    private Path findDefaultJarFile() {
-        List<Path> searchDirs = new ArrayList<>();
-        Path appDir = resolveAppDirectory();
-        if (appDir != null) {
-            searchDirs.add(appDir);
-            if (appDir.getParent() != null) {
-                searchDirs.add(appDir.getParent());
-            }
-        }
-        searchDirs.add(Path.of(System.getProperty("user.dir")));
-
-        for (Path dir : searchDirs) {
-            Path candidate = findJarByPrefix(dir, "FACTEMICLI");
-            if (candidate != null) {
-                return candidate;
-            }
-        }
-        return null;
-    }
-
-    private Path resolveAppDirectory() {
-        try {
-            Path codeLocation = Path.of(EFaturaGui.class.getProtectionDomain().getCodeSource().getLocation().toURI());
-            return Files.isRegularFile(codeLocation) ? codeLocation.getParent() : codeLocation;
-        } catch (Exception ex) {
-            return null;
-        }
-    }
-
-    private Path findJarByPrefix(Path dir, String prefix) {
-        if (dir == null || !Files.isDirectory(dir)) {
-            return null;
-        }
-        try (var stream = Files.list(dir)) {
-            return stream
-                    .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".jar"))
-                    .filter(p -> p.getFileName().toString().startsWith(prefix))
-                    .findFirst()
-                    .orElse(null);
-        } catch (IOException ex) {
-            return null;
-        }
+        yearField.setText(JarLocator.getDefaultYear());
+        monthField.setText(JarLocator.getDefaultMonth());
     }
 
     private void attachActions() {
@@ -270,16 +200,33 @@ public class EFaturaGui extends JFrame {
     }
 
     private void runJar() {
-        ValidationResult validation = validateInputs();
+        ValidationResult validation = InputValidator.validate(
+                jarPathField.getText().trim(),
+                nifField.getText().trim(),
+                String.valueOf(passwordField.getPassword()),
+                yearField.getText().trim(),
+                monthField.getText().trim(),
+                inputPathField.getText().trim()
+        );
+
         if (!validation.ok) {
             JOptionPane.showMessageDialog(this, validation.message, "Validacao", JOptionPane.WARNING_MESSAGE);
             return;
         }
 
         clearLog();
-        List<String> command = buildCommand();
+        List<String> command = AtClientRunner.buildCommand(
+                jarPathField.getText().trim(),
+                nifField.getText().trim(),
+                String.valueOf(passwordField.getPassword()),
+                yearField.getText().trim(),
+                monthField.getText().trim(),
+                String.valueOf(operationCombo.getSelectedItem()),
+                inputPathField.getText().trim(),
+                testModeCheck.isSelected()
+        );
         String initialJarPath = jarPathField.getText().trim();
-        appendLog("Comando: " + String.join(" ", maskPasswordForDisplay(command)));
+        appendLog("Comando: " + String.join(" ", AtClientRunner.maskPasswordForDisplay(command)));
 
         runButton.setEnabled(false);
         stopButton.setEnabled(true);
@@ -287,28 +234,16 @@ public class EFaturaGui extends JFrame {
         SwingWorker<Void, String> worker = new SwingWorker<>() {
             @Override
             protected Void doInBackground() {
-                ProcessBuilder pb = new ProcessBuilder(command);
-                pb.redirectErrorStream(false);
-
                 try {
-                    currentProcess = pb.start();
-                    publish("Processo iniciado...");
-
-                    Thread stdoutThread = new Thread(() -> handleStdout(currentProcess, initialJarPath, this::publishSafe));
-                    Thread stderrThread = new Thread(() -> streamToLog(currentProcess.getErrorStream(), "ERR", this::publishSafe));
-
-                    stdoutThread.start();
-                    stderrThread.start();
-
-                    int exitCode = currentProcess.waitFor();
-                    stdoutThread.join();
-                    stderrThread.join();
-
+                    int exitCode = atClientRunner.runProcess(
+                            command,
+                            initialJarPath,
+                            this::publishSafe,
+                            newPath -> jarPathField.setText(newPath)
+                    );
                     publish("Processo terminado com exit code: " + exitCode);
                 } catch (Exception ex) {
                     publish("Erro ao executar JAR: " + ex.getMessage());
-                } finally {
-                    currentProcess = null;
                 }
                 return null;
             }
@@ -335,170 +270,7 @@ public class EFaturaGui extends JFrame {
     }
 
     private void stopJar() {
-        Process process = currentProcess;
-        if (process != null && process.isAlive()) {
-            process.destroy();
-            appendLog("Pedido de paragem enviado ao processo.");
-        }
-    }
-
-    private ValidationResult validateInputs() {
-        String jar = jarPathField.getText().trim();
-        if (jar.isEmpty() || !Files.exists(Path.of(jar))) {
-            return ValidationResult.fail("Indique um caminho valido para o JAR.");
-        }
-
-        String nif = nifField.getText().trim();
-        if (nif.isEmpty()) {
-            return ValidationResult.fail("NIF e obrigatorio.");
-        }
-
-        String password = String.valueOf(passwordField.getPassword());
-        if (password.isBlank()) {
-            return ValidationResult.fail("Password e obrigatoria.");
-        }
-
-        String year = yearField.getText().trim();
-        if (!year.matches("\\d{4}")) {
-            return ValidationResult.fail("Ano invalido. Use YYYY.");
-        }
-
-        String month = monthField.getText().trim();
-        if (!month.matches("\\d{2}")) {
-            return ValidationResult.fail("Mes invalido. Use MM.");
-        }
-        int monthNumber = Integer.parseInt(month);
-        if (monthNumber < 1 || monthNumber > 12) {
-            return ValidationResult.fail("Mes invalido. Deve estar entre 01 e 12.");
-        }
-
-        String input = inputPathField.getText().trim();
-        if (input.isEmpty() || !Files.exists(Path.of(input))) {
-            return ValidationResult.fail("Indique um ficheiro SAF-T XML valido.");
-        }
-
-        return ValidationResult.ok();
-    }
-
-    private List<String> buildCommand() {
-        List<String> command = new ArrayList<>();
-        command.add("java");
-        command.add("-jar");
-        command.add(jarPathField.getText().trim());
-
-        command.add("-n");
-        command.add(nifField.getText().trim());
-
-        command.add("-p");
-        command.add(String.valueOf(passwordField.getPassword()));
-
-        command.add("-a");
-        command.add(yearField.getText().trim());
-
-        command.add("-m");
-        command.add(monthField.getText().trim());
-
-        command.add("-op");
-        command.add(String.valueOf(operationCombo.getSelectedItem()));
-
-        command.add("-i");
-        command.add(inputPathField.getText().trim());
-
-        if (testModeCheck.isSelected()) {
-            command.add("-t");
-        }
-
-        return command;
-    }
-
-    private List<String> maskPasswordForDisplay(List<String> command) {
-        List<String> masked = new ArrayList<>(command);
-        for (int i = 0; i < masked.size() - 1; i++) {
-            if ("-p".equals(masked.get(i))) {
-                masked.set(i + 1, "********");
-            }
-        }
-        return masked;
-    }
-
-    private void streamToLog(InputStream stream, String prefix, Consumer<String> sink) {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, PROCESS_OUTPUT_CHARSET))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                sink.accept("[" + prefix + "] " + line);
-            }
-        } catch (IOException ex) {
-            sink.accept("[" + prefix + "] Erro de leitura: " + ex.getMessage());
-        }
-    }
-
-    // Reads stdout like streamToLog, but also watches for the AT client's JAR self-update prompt
-    // and answers it automatically so the process doesn't hang waiting for interactive input.
-    private void handleStdout(Process process, String currentJarPath, Consumer<String> sink) {
-        AtomicReference<String> pendingVersion = new AtomicReference<>();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), PROCESS_OUTPUT_CHARSET))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                sink.accept("[OUT] " + line);
-
-                Matcher versionMatcher = UPDATE_VERSION_PATTERN.matcher(line);
-                if (versionMatcher.find()) {
-                    pendingVersion.set(versionMatcher.group(1));
-                    sink.accept("[INFO] O cliente de linha de comandos esta desatualizado. Nova versao detetada: "
-                            + pendingVersion.get() + ". A preparar transferencia automatica...");
-                }
-
-                if (line.contains(UPDATE_PROMPT_MARKER)) {
-                    respondToUpdatePrompt(process, currentJarPath, pendingVersion.get(), sink);
-                }
-            }
-        } catch (IOException ex) {
-            sink.accept("[OUT] Erro de leitura: " + ex.getMessage());
-        }
-    }
-
-    private void respondToUpdatePrompt(Process process, String currentJarPath, String version, Consumer<String> sink) {
-        Path targetDir = resolveUpdateJarDirectory(currentJarPath);
-        try {
-            // The AT client expects a destination folder here, not a full file path with name.
-            PrintWriter writer = new PrintWriter(new OutputStreamWriter(process.getOutputStream(), PROCESS_OUTPUT_CHARSET), true);
-            writer.println(targetDir.toAbsolutePath());
-            writer.flush();
-            String fileName = version != null
-                    ? "FACTEMICLI-" + version + "-cmdClient.jar"
-                    : "FACTEMICLI-cmdClient-atualizado.jar";
-            Path expectedJar = targetDir.resolve(fileName);
-            sink.accept("[INFO] A transferir nova versao do cliente para a pasta: " + targetDir.toAbsolutePath());
-            SwingUtilities.invokeLater(() -> jarPathField.setText(expectedJar.toAbsolutePath().toString()));
-        } catch (Exception ex) {
-            sink.accept("[ERRO] Nao foi possivel responder automaticamente ao pedido de atualizacao do JAR: " + ex.getMessage());
-            sink.accept("[ERRO] Atualize manualmente o cliente de linha de comandos (JAR) e volte a executar.");
-        }
-    }
-
-    // Falls back to a writable temp folder when the current JAR's folder isn't writable
-    // (e.g. an install directory without permissions).
-    private Path resolveUpdateJarDirectory(String currentJarPath) {
-        Path currentJar = Path.of(currentJarPath);
-        Path dir = currentJar.getParent();
-        if (dir == null || !Files.isWritable(dir)) {
-            dir = Path.of(System.getProperty("java.io.tmpdir"));
-        }
-        return dir;
-    }
-
-    private static Charset resolveNativeCharset() {
-        // Since JDK 18 (JEP 400), file.encoding/default charset is UTF-8 regardless of OS locale,
-        // but child process I/O still uses the OS console/native charset, exposed via this property.
-        String nativeEncoding = System.getProperty("native.encoding", System.getProperty("sun.jnu.encoding"));
-        if (nativeEncoding != null) {
-            try {
-                return Charset.forName(nativeEncoding);
-            } catch (Exception ex) {
-                // fall through to platform default below
-            }
-        }
-        return Charset.defaultCharset();
+        atClientRunner.stopProcess(this::appendLog);
     }
 
     private void appendLog(String text) {
@@ -513,73 +285,9 @@ public class EFaturaGui extends JFrame {
     }
 
     private void applyUiScale() {
-        applyScaleRecursively(getContentPane());
+        UiScaler.applyScale(getContentPane(), uiScale);
         revalidate();
         repaint();
-    }
-
-    private void applyScaleRecursively(Component component) {
-        if (component instanceof JLabel) {
-            JLabel label = (JLabel) component;
-            Font font = getBaseFont(label);
-            if (font != null) {
-                label.setFont(font.deriveFont((float) scaled(font.getSize2D())));
-            }
-        } else if (component instanceof JButton) {
-            JButton button = (JButton) component;
-            Font font = getBaseFont(button);
-            if (font != null) {
-                button.setFont(font.deriveFont((float) scaled(font.getSize2D())));
-            }
-            Dimension preferred = button.getPreferredSize();
-            button.setPreferredSize(new Dimension(preferred.width, Math.max(scaled(28), preferred.height)));
-        } else if (component instanceof JTextField) {
-            JTextField field = (JTextField) component;
-            Font font = getBaseFont(field);
-            if (font != null) {
-                field.setFont(font.deriveFont((float) scaled(font.getSize2D())));
-            }
-            Dimension preferred = field.getPreferredSize();
-            field.setPreferredSize(new Dimension(preferred.width, scaled(30)));
-        } else if (component instanceof JComboBox) {
-            JComboBox<?> combo = (JComboBox<?>) component;
-            Font font = getBaseFont(combo);
-            if (font != null) {
-                combo.setFont(font.deriveFont((float) scaled(font.getSize2D())));
-            }
-            Dimension preferred = combo.getPreferredSize();
-            combo.setPreferredSize(new Dimension(preferred.width, scaled(30)));
-        } else if (component instanceof JCheckBox) {
-            JCheckBox checkBox = (JCheckBox) component;
-            Font font = getBaseFont(checkBox);
-            if (font != null) {
-                checkBox.setFont(font.deriveFont((float) scaled(font.getSize2D())));
-            }
-        } else if (component instanceof JTextArea) {
-            JTextArea textArea = (JTextArea) component;
-            textArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, scaled(13)));
-        }
-
-        if (component instanceof Container) {
-            for (Component child : ((Container) component).getComponents()) {
-                applyScaleRecursively(child);
-            }
-        }
-    }
-
-    private int scaled(double value) {
-        return Math.max(10, (int) Math.round(value * uiScale));
-    }
-
-    private Font getBaseFont(JComponent component) {
-        Object base = component.getClientProperty("baseFont");
-        if (base instanceof Font) {
-            return (Font) base;
-        }
-
-        Font current = component.getFont();
-        component.putClientProperty("baseFont", current);
-        return current;
     }
 
     public static void main(String[] args) {
@@ -588,23 +296,5 @@ public class EFaturaGui extends JFrame {
             gui.setLocationRelativeTo(null);
             gui.setVisible(true);
         });
-    }
-
-    private static class ValidationResult {
-        final boolean ok;
-        final String message;
-
-        private ValidationResult(boolean ok, String message) {
-            this.ok = ok;
-            this.message = message;
-        }
-
-        static ValidationResult ok() {
-            return new ValidationResult(true, "");
-        }
-
-        static ValidationResult fail(String message) {
-            return new ValidationResult(false, message);
-        }
     }
 }

@@ -7,8 +7,10 @@ import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
+import javax.swing.JSpinner;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
+import javax.swing.JTextPane;
 
 public class UiScaler {
 
@@ -48,8 +50,17 @@ public class UiScaler {
             if (font != null) {
                 checkBox.setFont(font.deriveFont((float) scaled(font.getSize2D(), uiScale)));
             }
+        } else if (component instanceof JSpinner spinner) {
+            Font font = getBaseFont(spinner);
+            if (font != null) {
+                spinner.setFont(font.deriveFont((float) scaled(font.getSize2D(), uiScale)));
+            }
+            Dimension preferred = spinner.getPreferredSize();
+            spinner.setPreferredSize(new Dimension(preferred.width, scaled(30, uiScale)));
         } else if (component instanceof JTextArea textArea) {
             textArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, scaled(13, uiScale)));
+        } else if (component instanceof JTextPane textPane) {
+            textPane.setFont(new Font(Font.MONOSPACED, Font.PLAIN, scaled(13, uiScale)));
         }
 
         if (component instanceof Container c) {

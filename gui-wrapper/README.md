@@ -11,7 +11,8 @@ Desktop app in Java Swing that wraps the official AT e-Fatura JAR so you can run
 
 ## Project structure
 
-- `src/EFaturaGui.java`: main GUI and process execution logic
+- `src/`: modular Java source components (`EFaturaGui`, `AtClientRunner`, `InputValidator`, `ValidationResult`, `JarLocator`, `UiScaler`)
+- `DESIGN.md`: architecture design and component specifications
 - `build.bat`: compiles Java source to `bin`
 - `run.bat`: runs build, then launches the GUI
 - `package-exe.bat`: builds a Windows `.exe` installer using `jpackage`

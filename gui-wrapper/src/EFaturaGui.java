@@ -1,18 +1,33 @@
-import javax.swing.*;
-import javax.swing.border.EmptyBorder;
 import java.awt.*;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import javax.swing.*;
+import javax.swing.border.EmptyBorder;
+import javax.swing.filechooser.FileNameExtensionFilter;
 
 public class EFaturaGui extends JFrame {
+    // The AT client prints using the OS console charset (e.g. Windows-1252 on pt-PT Windows), not UTF-8.
+    private static final Charset PROCESS_OUTPUT_CHARSET = resolveNativeCharset();
+
+    // Matches the AT client's "o jar precisa de atualizacao" message, e.g. "nova versao 2.9.2-103953".
+    private static final Pattern UPDATE_VERSION_PATTERN =
+            Pattern.compile("nova vers[aã]o\\s+([0-9]+(?:\\.[0-9]+)+-[0-9]+)", Pattern.CASE_INSENSITIVE);
+    private static final String UPDATE_PROMPT_MARKER = "Indique o caminho completo para guardar o novo jar";
+
     private double uiScale = 1.0;
 
     private final JTextField jarPathField = new JTextField();
@@ -156,7 +171,10 @@ public class EFaturaGui extends JFrame {
 
     private void preloadDefaults() {
         Path cwd = Path.of(System.getProperty("user.dir"));
-        Path defaultJar = cwd.resolve("FACTEMICLI-2.9.1-100067-cmdClient.jar");
+
+        // No exact version is hardcoded here: findDefaultJarFile() matches any FACTEMICLI*.jar by prefix.
+        Path detectedJar = findDefaultJarFile();
+        Path defaultJar = detectedJar != null ? detectedJar : cwd.resolve("FACTEMICLI-2.9.1-100067-cmdClient.jar");
         jarPathField.setText(defaultJar.toAbsolutePath().toString());
 
         Path defaultXml = cwd.resolve("F_D05_515105422_SAFT_20260501_20260531.xml");
@@ -167,6 +185,52 @@ public class EFaturaGui extends JFrame {
         LocalDate now = LocalDate.now();
         yearField.setText(String.valueOf(now.getYear()));
         monthField.setText(String.format("%02d", now.getMonthValue()));
+    }
+
+    // The working directory of a jpackage exe launched from a shortcut is unreliable,
+    // so locate the AT client JAR relative to where this app's own JAR is running from.
+    private Path findDefaultJarFile() {
+        List<Path> searchDirs = new ArrayList<>();
+        Path appDir = resolveAppDirectory();
+        if (appDir != null) {
+            searchDirs.add(appDir);
+            if (appDir.getParent() != null) {
+                searchDirs.add(appDir.getParent());
+            }
+        }
+        searchDirs.add(Path.of(System.getProperty("user.dir")));
+
+        for (Path dir : searchDirs) {
+            Path candidate = findJarByPrefix(dir, "FACTEMICLI");
+            if (candidate != null) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private Path resolveAppDirectory() {
+        try {
+            Path codeLocation = Path.of(EFaturaGui.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+            return Files.isRegularFile(codeLocation) ? codeLocation.getParent() : codeLocation;
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private Path findJarByPrefix(Path dir, String prefix) {
+        if (dir == null || !Files.isDirectory(dir)) {
+            return null;
+        }
+        try (var stream = Files.list(dir)) {
+            return stream
+                    .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".jar"))
+                    .filter(p -> p.getFileName().toString().startsWith(prefix))
+                    .findFirst()
+                    .orElse(null);
+        } catch (IOException ex) {
+            return null;
+        }
     }
 
     private void attachActions() {
@@ -188,6 +252,7 @@ public class EFaturaGui extends JFrame {
     private void chooseJarFile() {
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("Selecionar JAR");
+        chooser.setFileFilter(new FileNameExtensionFilter("Ficheiros JAR (*.jar)", "jar"));
         int result = chooser.showOpenDialog(this);
         if (result == JFileChooser.APPROVE_OPTION) {
             jarPathField.setText(chooser.getSelectedFile().getAbsolutePath());
@@ -197,6 +262,7 @@ public class EFaturaGui extends JFrame {
     private void chooseInputFile() {
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("Selecionar ficheiro SAF-T XML");
+        chooser.setFileFilter(new FileNameExtensionFilter("Ficheiros XML (*.xml)", "xml"));
         int result = chooser.showOpenDialog(this);
         if (result == JFileChooser.APPROVE_OPTION) {
             inputPathField.setText(chooser.getSelectedFile().getAbsolutePath());
@@ -212,6 +278,7 @@ public class EFaturaGui extends JFrame {
 
         clearLog();
         List<String> command = buildCommand();
+        String initialJarPath = jarPathField.getText().trim();
         appendLog("Comando: " + String.join(" ", maskPasswordForDisplay(command)));
 
         runButton.setEnabled(false);
@@ -227,7 +294,7 @@ public class EFaturaGui extends JFrame {
                     currentProcess = pb.start();
                     publish("Processo iniciado...");
 
-                    Thread stdoutThread = new Thread(() -> streamToLog(currentProcess.getInputStream(), "OUT", this::publishSafe));
+                    Thread stdoutThread = new Thread(() -> handleStdout(currentProcess, initialJarPath, this::publishSafe));
                     Thread stderrThread = new Thread(() -> streamToLog(currentProcess.getErrorStream(), "ERR", this::publishSafe));
 
                     stdoutThread.start();
@@ -354,8 +421,8 @@ public class EFaturaGui extends JFrame {
         return masked;
     }
 
-    private void streamToLog(InputStream stream, String prefix, java.util.function.Consumer<String> sink) {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+    private void streamToLog(InputStream stream, String prefix, Consumer<String> sink) {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, PROCESS_OUTPUT_CHARSET))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 sink.accept("[" + prefix + "] " + line);
@@ -363,6 +430,75 @@ public class EFaturaGui extends JFrame {
         } catch (IOException ex) {
             sink.accept("[" + prefix + "] Erro de leitura: " + ex.getMessage());
         }
+    }
+
+    // Reads stdout like streamToLog, but also watches for the AT client's JAR self-update prompt
+    // and answers it automatically so the process doesn't hang waiting for interactive input.
+    private void handleStdout(Process process, String currentJarPath, Consumer<String> sink) {
+        AtomicReference<String> pendingVersion = new AtomicReference<>();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), PROCESS_OUTPUT_CHARSET))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sink.accept("[OUT] " + line);
+
+                Matcher versionMatcher = UPDATE_VERSION_PATTERN.matcher(line);
+                if (versionMatcher.find()) {
+                    pendingVersion.set(versionMatcher.group(1));
+                    sink.accept("[INFO] O cliente de linha de comandos esta desatualizado. Nova versao detetada: "
+                            + pendingVersion.get() + ". A preparar transferencia automatica...");
+                }
+
+                if (line.contains(UPDATE_PROMPT_MARKER)) {
+                    respondToUpdatePrompt(process, currentJarPath, pendingVersion.get(), sink);
+                }
+            }
+        } catch (IOException ex) {
+            sink.accept("[OUT] Erro de leitura: " + ex.getMessage());
+        }
+    }
+
+    private void respondToUpdatePrompt(Process process, String currentJarPath, String version, Consumer<String> sink) {
+        Path targetDir = resolveUpdateJarDirectory(currentJarPath);
+        try {
+            // The AT client expects a destination folder here, not a full file path with name.
+            PrintWriter writer = new PrintWriter(new OutputStreamWriter(process.getOutputStream(), PROCESS_OUTPUT_CHARSET), true);
+            writer.println(targetDir.toAbsolutePath());
+            writer.flush();
+            String fileName = version != null
+                    ? "FACTEMICLI-" + version + "-cmdClient.jar"
+                    : "FACTEMICLI-cmdClient-atualizado.jar";
+            Path expectedJar = targetDir.resolve(fileName);
+            sink.accept("[INFO] A transferir nova versao do cliente para a pasta: " + targetDir.toAbsolutePath());
+            SwingUtilities.invokeLater(() -> jarPathField.setText(expectedJar.toAbsolutePath().toString()));
+        } catch (Exception ex) {
+            sink.accept("[ERRO] Nao foi possivel responder automaticamente ao pedido de atualizacao do JAR: " + ex.getMessage());
+            sink.accept("[ERRO] Atualize manualmente o cliente de linha de comandos (JAR) e volte a executar.");
+        }
+    }
+
+    // Falls back to a writable temp folder when the current JAR's folder isn't writable
+    // (e.g. an install directory without permissions).
+    private Path resolveUpdateJarDirectory(String currentJarPath) {
+        Path currentJar = Path.of(currentJarPath);
+        Path dir = currentJar.getParent();
+        if (dir == null || !Files.isWritable(dir)) {
+            dir = Path.of(System.getProperty("java.io.tmpdir"));
+        }
+        return dir;
+    }
+
+    private static Charset resolveNativeCharset() {
+        // Since JDK 18 (JEP 400), file.encoding/default charset is UTF-8 regardless of OS locale,
+        // but child process I/O still uses the OS console/native charset, exposed via this property.
+        String nativeEncoding = System.getProperty("native.encoding", System.getProperty("sun.jnu.encoding"));
+        if (nativeEncoding != null) {
+            try {
+                return Charset.forName(nativeEncoding);
+            } catch (Exception ex) {
+                // fall through to platform default below
+            }
+        }
+        return Charset.defaultCharset();
     }
 
     private void appendLog(String text) {

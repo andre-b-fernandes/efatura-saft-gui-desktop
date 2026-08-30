@@ -13,7 +13,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import javax.swing.SwingUtilities;
 
 public class AtClientRunner {
 
@@ -75,11 +74,10 @@ public class AtClientRunner {
         return masked;
     }
 
-    public int runProcess(
+    public ProcessOutcome runProcess(
             List<String> command,
             String initialJarPath,
-            Consumer<String> logSink,
-            Consumer<String> updatedJarPathCallback
+            Consumer<String> logSink
     ) throws Exception {
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(false);
@@ -87,7 +85,8 @@ public class AtClientRunner {
         currentProcess = pb.start();
         logSink.accept("Processo iniciado...");
 
-        Thread stdoutThread = new Thread(() -> handleStdout(currentProcess, initialJarPath, logSink, updatedJarPathCallback));
+        AtomicReference<String> updatedJarPath = new AtomicReference<>();
+        Thread stdoutThread = new Thread(() -> handleStdout(currentProcess, initialJarPath, logSink, updatedJarPath));
         Thread stderrThread = new Thread(() -> streamToLog(currentProcess.getErrorStream(), "ERR", logSink));
 
         stdoutThread.start();
@@ -98,7 +97,7 @@ public class AtClientRunner {
         stderrThread.join();
 
         currentProcess = null;
-        return exitCode;
+        return new ProcessOutcome(exitCode, updatedJarPath.get());
     }
 
     public void stopProcess(Consumer<String> logSink) {
@@ -124,7 +123,7 @@ public class AtClientRunner {
             Process process,
             String currentJarPath,
             Consumer<String> sink,
-            Consumer<String> updatedJarPathCallback
+            AtomicReference<String> updatedJarPath
     ) {
         AtomicReference<String> pendingVersion = new AtomicReference<>();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), PROCESS_OUTPUT_CHARSET))) {
@@ -140,7 +139,7 @@ public class AtClientRunner {
                 }
 
                 if (line.contains(UPDATE_PROMPT_MARKER)) {
-                    respondToUpdatePrompt(process, currentJarPath, pendingVersion.get(), sink, updatedJarPathCallback);
+                    respondToUpdatePrompt(process, currentJarPath, pendingVersion.get(), sink, updatedJarPath);
                 }
             }
         } catch (IOException ex) {
@@ -153,7 +152,7 @@ public class AtClientRunner {
             String currentJarPath,
             String version,
             Consumer<String> sink,
-            Consumer<String> updatedJarPathCallback
+            AtomicReference<String> updatedJarPath
     ) {
         Path targetDir = resolveUpdateJarDirectory(currentJarPath);
         try {
@@ -165,7 +164,7 @@ public class AtClientRunner {
                     : "FACTEMICLI-cmdClient-atualizado.jar";
             Path expectedJar = targetDir.resolve(fileName);
             sink.accept("[INFO] A transferir nova versao do cliente para a pasta: " + targetDir.toAbsolutePath());
-            SwingUtilities.invokeLater(() -> updatedJarPathCallback.accept(expectedJar.toAbsolutePath().toString()));
+            updatedJarPath.set(expectedJar.toAbsolutePath().toString());
         } catch (Exception ex) {
             sink.accept("[ERRO] Nao foi possivel responder automaticamente ao pedido de atualizacao do JAR: " + ex.getMessage());
             sink.accept("[ERRO] Atualize manualmente o cliente de linha de comandos (JAR) e volte a executar.");

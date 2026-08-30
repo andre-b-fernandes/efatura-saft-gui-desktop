@@ -33,6 +33,11 @@ java -cp .\bin EFaturaGui
 
 Then exercise the GUI against a local AT JAR and a SAF-T XML file.
 
+## Mandatory verification after edits
+
+- After making ANY change to files under `gui-wrapper/src`, you MUST run `.\build.bat` from `gui-wrapper` and confirm it prints `Build concluido com sucesso.` before considering the change complete.
+- If the build fails, fix the compile error and rebuild until it succeeds. Never report a source change as done without a passing build.
+
 ## High-level architecture
 
 - The app is split into modular components under `src/` (see `gui-wrapper/DESIGN.md` for detailed design specifications):
